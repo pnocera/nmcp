@@ -157,3 +157,78 @@ func (o *Orchestrator) finalizeWorkflow(workflowID string, state WorkflowState) 
 		log.Printf("Failed to publish workflow completion: %v", err)
 	}
 }
+
+func (o *Orchestrator) retryTask(workflowID string, taskID string, state WorkflowState) {
+	log.Printf("Retrying task %s for workflow %s", taskID, workflowID)
+
+	// Increment retry count for the task
+	if state.RetryCounts == nil {
+		state.RetryCounts = make(map[string]int)
+	}
+	state.RetryCounts[taskID]++
+
+	// Update task state to pending
+	state.PendingTasks = append(state.PendingTasks, taskID)
+	delete(state.CompletedTasks, taskID)
+
+	// Save updated workflow state
+	o.saveWorkflowState(workflowID, state)
+}
+
+func (o *Orchestrator) followFailurePath(workflowID string, taskID string, state WorkflowState, wf WorkflowDefinition) {
+	log.Printf("Following failure path for task %s in workflow %s", taskID, workflowID)
+
+	// Find the failure path for the task
+	task, exists := wf.Tasks[taskID]
+	if !exists {
+		log.Printf("Task %s not found in workflow definition for workflow %s", taskID, workflowID)
+		return
+	}
+
+	for _, failureTaskID := range task.OnFailure {
+		state.PendingTasks = append(state.PendingTasks, failureTaskID)
+	}
+
+	// Save updated workflow state
+	o.saveWorkflowState(workflowID, state)
+}
+
+func (o *Orchestrator) restartWorkflow(workflowID string, state WorkflowState) {
+	log.Printf("Restarting workflow %s", workflowID)
+
+	// Clear completed and pending tasks
+	state.CompletedTasks = make(map[string]interface{})
+	state.PendingTasks = nil
+
+	// Add initial tasks to pending tasks
+	_, exists := o.workflows[state.DefinitionID]
+	if !exists {
+		log.Printf("No definition found for workflow %s", workflowID)
+		return
+	}
+	//for taskID := range wf.InitialTasks {
+	//	state.PendingTasks = append(state.PendingTasks, taskID)
+	//}
+
+	// Save updated workflow state
+	o.saveWorkflowState(workflowID, state)
+}
+
+func (o *Orchestrator) saveWorkflowState(workflowID string, state WorkflowState) {
+	kv, err := o.js.KeyValue("workflow_state")
+	if err != nil {
+		log.Printf("Failed to access workflow state KV: %v", err)
+		return
+	}
+
+	state.UpdatedAt = time.Now()
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		log.Printf("Failed to encode workflow state: %v", err)
+		return
+	}
+
+	if _, err := kv.Put(workflowID, stateBytes); err != nil {
+		log.Printf("Failed to save workflow state for %s: %v", workflowID, err)
+	}
+}
